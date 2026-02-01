@@ -1,10 +1,14 @@
 mod conf;
 
 fn main() {
-    let (config_file_path, ok) = conf::get_config_file_path();
-    println!(
-        "configuration file path: {}\nfound: {}",
-        config_file_path.display(),
-        ok
-    );
+    if let Err(e) = run() {
+        eprintln!("fatal: {}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let config = conf::read_config_from_file()?;
+    println!("sourceRoot: {}", config.source_root);
+    Ok(())
 }
