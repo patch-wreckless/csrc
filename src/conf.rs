@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     env,
     fmt::{self, Display},
     path::PathBuf,
@@ -86,10 +85,17 @@ impl Default for CacheLocation {
     }
 }
 
-pub fn load_config() -> Result<Config, ConfigError> {
+pub fn load_config(overrides: &[(String, String)]) -> Result<Config, ConfigError> {
     let mut merged = load_config_from_file()?;
 
-    apply_overrides(&mut merged, &load_config_from_env())?;
+    apply_overrides(&mut merged, load_config_from_env())?;
+
+    let exlpicit_overrides = overrides.iter().map(|(key, val)| {
+        let path: Vec<String> = key.split(".").map(|s| s.to_string()).collect();
+        (path, val.clone())
+    });
+
+    apply_overrides(&mut merged, exlpicit_overrides)?;
 
     let config: Config =
         serde_yaml::from_value(YamlValue::Mapping(merged)).map_err(ConfigError::ParseError)?;
@@ -136,11 +142,11 @@ fn read_config_file() -> Option<Result<Vec<u8>, std::io::Error>> {
     None
 }
 
-fn load_config_from_env() -> BTreeMap<Vec<String>, String> {
+fn load_config_from_env() -> Vec<(Vec<String>, String)> {
     env_to_config_overrides("CSRC__")
 }
 
-fn env_to_config_overrides(prefix: &str) -> BTreeMap<Vec<String>, String> {
+fn env_to_config_overrides(prefix: &str) -> Vec<(Vec<String>, String)> {
     std::env::vars()
         .filter(|(key, _)| key.starts_with(prefix))
         .map(|(key, val)| {
@@ -173,13 +179,13 @@ fn screaming_snake_to_camel(s: &str) -> String {
 
 // TODO: Use override keys with at least one path segment so we don't need to check for empty.
 
-fn apply_overrides(
-    map: &mut YamlMapping,
-    overrides: &BTreeMap<Vec<String>, String>,
-) -> Result<(), ConfigError> {
+fn apply_overrides<I>(map: &mut YamlMapping, overrides: I) -> Result<(), ConfigError>
+where
+    I: IntoIterator<Item = (Vec<String>, String)>,
+{
     for (path, value) in overrides {
         let path_refs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
-        let value = serde_yaml::from_str(value).map_err(|e| ConfigError::InvalidValue {
+        let value = serde_yaml::from_str(&value).map_err(|e| ConfigError::InvalidValue {
             field: path.join("."),
             value: value.clone(),
             details: format!("failed to parse override value: {}", e),
