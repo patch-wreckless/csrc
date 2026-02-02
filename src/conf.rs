@@ -1,26 +1,39 @@
-use std::{env, fmt, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    env,
+    fmt::{self, Display},
+    path::PathBuf,
+};
 
-use serde::Deserialize;
-
-#[derive(Debug, Deserialize)]
-pub struct Config {
-    #[serde(rename = "sourceRoot")]
-    pub source_root: String,
-}
+use serde::{Deserialize, Serialize};
+use serde_yaml::Mapping as YamlMapping;
+use serde_yaml::Value as YamlValue;
 
 #[derive(Debug)]
 pub enum ConfigError {
-    FileNotFound,
     ReadError(std::io::Error),
     ParseError(serde_yaml::Error),
+    InvalidValue {
+        field: String,
+        value: String,
+        details: String,
+    },
 }
 
-impl fmt::Display for ConfigError {
+impl Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ConfigError::FileNotFound => write!(f, "config file not found"),
             ConfigError::ReadError(e) => write!(f, "failed to read config file: {}", e),
             ConfigError::ParseError(e) => write!(f, "failed to parse config file: {}", e),
+            ConfigError::InvalidValue {
+                field,
+                value,
+                details,
+            } => write!(
+                f,
+                "invalid value for field '{}': '{}' - {}",
+                field, value, details
+            ),
         }
     }
 }
@@ -30,26 +43,75 @@ impl std::error::Error for ConfigError {
         match self {
             ConfigError::ReadError(e) => Some(e),
             ConfigError::ParseError(e) => Some(e),
-            ConfigError::FileNotFound => None,
+            ConfigError::InvalidValue { .. } => None,
         }
     }
 }
 
-pub fn read_config_from_file() -> Result<Config, ConfigError> {
-    let (config_file_path, ok) = get_config_file_path();
-    if !ok {
-        return Err(ConfigError::FileNotFound);
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct Config {
+    #[serde(rename = "sourceRoot", default)]
+    pub source_root: SourceRoot,
+
+    #[serde(default)]
+    pub cache: CacheConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SourceRoot(pub PathBuf);
+
+impl Default for SourceRoot {
+    fn default() -> Self {
+        SourceRoot(PathBuf::from("~"))
     }
+}
 
-    let contents =
-        std::fs::read_to_string(config_file_path).map_err(|e| ConfigError::ReadError(e))?;
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct CacheConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub location: CacheLocation,
+}
 
-    let config: Config = serde_yaml::from_str(&contents).map_err(ConfigError::ParseError)?;
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CacheLocation(pub PathBuf);
+
+impl Default for CacheLocation {
+    fn default() -> Self {
+        if let Some(cache_home) = env::var_os("XDG_CACHE_HOME") {
+            return CacheLocation(PathBuf::from(cache_home).join("csrc"));
+        }
+        CacheLocation(PathBuf::from("~/.cache/csrc"))
+    }
+}
+
+pub fn load_config() -> Result<Config, ConfigError> {
+    let mut merged = load_config_from_file()?;
+
+    apply_overrides(&mut merged, &load_config_from_env())?;
+
+    let config: Config =
+        serde_yaml::from_value(YamlValue::Mapping(merged)).map_err(ConfigError::ParseError)?;
 
     Ok(config)
 }
 
-pub fn get_config_file_path() -> (PathBuf, bool) {
+fn load_config_from_file() -> Result<YamlMapping, ConfigError> {
+    match read_config_file() {
+        None => Ok(YamlMapping::new()),
+        Some(res) => match res {
+            Err(e) => Err(ConfigError::ReadError(e)),
+            Ok(contents) => {
+                let yaml_value: YamlMapping =
+                    serde_yaml::from_slice(&contents).map_err(ConfigError::ParseError)?;
+                Ok(yaml_value)
+            }
+        },
+    }
+}
+
+fn read_config_file() -> Option<Result<Vec<u8>, std::io::Error>> {
     let mut candidates = Vec::with_capacity(5);
 
     if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
@@ -64,15 +126,92 @@ pub fn get_config_file_path() -> (PathBuf, bool) {
     }
 
     for candidate in &candidates {
-        if candidate.exists() {
-            return (candidate.clone(), true);
+        match std::fs::read(candidate) {
+            Ok(contents) => return Some(Ok(contents)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Some(Err(e)),
         }
     }
 
-    // Fallback to first candidate, or current dir if no candidates.
-    let fallback = candidates
-        .first()
-        .cloned()
-        .unwrap_or_else(|| PathBuf::from("."));
-    (fallback, false)
+    None
+}
+
+fn load_config_from_env() -> BTreeMap<Vec<String>, String> {
+    env_to_config_overrides("CSRC__")
+}
+
+fn env_to_config_overrides(prefix: &str) -> BTreeMap<Vec<String>, String> {
+    std::env::vars()
+        .filter(|(key, _)| key.starts_with(prefix))
+        .map(|(key, val)| {
+            let name = &key[prefix.len()..];
+            let path: Vec<String> = name
+                .split("__")
+                .map(|s| screaming_snake_to_camel(s))
+                .collect();
+            (path, val)
+        })
+        .collect()
+}
+
+fn screaming_snake_to_camel(s: &str) -> String {
+    let binding = s.to_lowercase();
+    let words = binding.split('_');
+    let mut iter = words.into_iter();
+    let first = iter.next().unwrap_or("").to_string();
+    let rest: String = iter
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect();
+    first + &rest
+}
+
+// TODO: Use override keys with at least one path segment so we don't need to check for empty.
+
+fn apply_overrides(
+    map: &mut YamlMapping,
+    overrides: &BTreeMap<Vec<String>, String>,
+) -> Result<(), ConfigError> {
+    for (path, value) in overrides {
+        let path_refs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+        let value = serde_yaml::from_str(value).map_err(|e| ConfigError::InvalidValue {
+            field: path.join("."),
+            value: value.clone(),
+            details: format!("failed to parse override value: {}", e),
+        })?;
+        apply_override(map, &path_refs, &value)?;
+    }
+    Ok(())
+}
+
+fn apply_override(
+    map: &mut YamlMapping,
+    path: &[&str],
+    value: &YamlValue,
+) -> Result<(), ConfigError> {
+    // TODO: Catch conflicts like trying to override a non-mapping value with a mapping.
+
+    if path.is_empty() {
+        return Ok(());
+    }
+
+    if path.len() == 1 {
+        map.insert(YamlValue::from(path[0]), value.clone());
+        return Ok(());
+    }
+
+    let entry = map
+        .entry(YamlValue::from(path[0]))
+        .or_insert(YamlValue::Mapping(YamlMapping::new()));
+
+    if let YamlValue::Mapping(m) = entry {
+        return apply_override(m, &path[1..], value);
+    }
+
+    Ok(())
 }

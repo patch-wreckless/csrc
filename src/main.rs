@@ -8,7 +8,7 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let config = conf::read_config_from_file()?;
-    println!("sourceRoot: {}", config.source_root);
+    let config = conf::load_config()?;
+    println!("config: {:?}", config);
     Ok(())
 }
