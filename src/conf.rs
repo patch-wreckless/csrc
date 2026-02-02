@@ -69,19 +69,20 @@ impl Default for SourceRoot {
 pub struct CacheConfig {
     #[serde(default)]
     pub enabled: bool,
+
     #[serde(default)]
-    pub location: CacheLocation,
+    pub directory: CacheDirectory,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct CacheLocation(pub PathBuf);
+pub struct CacheDirectory(pub PathBuf);
 
-impl Default for CacheLocation {
+impl Default for CacheDirectory {
     fn default() -> Self {
         if let Some(cache_home) = env::var_os("XDG_CACHE_HOME") {
-            return CacheLocation(PathBuf::from(cache_home).join("csrc"));
+            return CacheDirectory(PathBuf::from(cache_home).join("csrc"));
         }
-        CacheLocation(PathBuf::from("~/.cache/csrc"))
+        CacheDirectory(PathBuf::from("~/.cache/csrc"))
     }
 }
 
